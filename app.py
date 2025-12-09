@@ -4,7 +4,7 @@ from pathlib import Path
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain.chains import ConversationalRetrievalChain
+from langchain.chains import create_conversational_retrieval_chain
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import CTransformers
 
@@ -97,11 +97,8 @@ def create_doc_vector_store(doc_chunks, embeddings):
 
 def create_conversational_chain(vector_store, llm):
     """Membuat chain untuk percakapan RAG."""
-    return ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=vector_store.as_retriever(),
-        return_source_documents=True
-    )
+    retriever = vector_store.as_retriever()
+    return create_conversational_retrieval_chain(llm, retriever)
 
 # --- Antarmuka Streamlit ---
 
