@@ -1,10 +1,9 @@
-
 import streamlit as st
 from pathlib import Path
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain.chains import create_conversational_retrieval_chain
+from langchain.chains import ConversationalRetrievalChain
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import CTransformers
 
@@ -28,7 +27,7 @@ def load_embedding_model():
     embeddings = HuggingFaceEmbeddings(
         model_name=EMBEDDING_MODEL_NAME,
         cache_folder=str(CACHE_DIR),
-        model_kwargs={'device': 'cpu'} # Gunakan CPU
+        model_kwargs={"device": "cpu"}  # Gunakan CPU
     )
     st.write("Model embedding berhasil dimuat.")
     return embeddings
@@ -45,10 +44,10 @@ def load_llm():
         model_file=LLM_MODEL_FILE,
         model_type="llama",
         config={
-            'max_new_tokens': 256,
-            'temperature': 0.7,
-            'context_length': 2048
-        }
+            "max_new_tokens": 256,
+            "temperature": 0.7,
+            "context_length": 2048,
+        },
     )
     st.write("Model LLM berhasil dimuat.")
     return llm
@@ -59,7 +58,7 @@ def get_text_chunks(text_data):
     """Memecah teks menjadi potongan-potongan (chunks)."""
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
-        chunk_overlap=200
+        chunk_overlap=200,
     )
     chunks = text_splitter.split_text(text_data)
     return chunks
@@ -68,7 +67,7 @@ def get_text_chunks_from_docs(documents):
     """Memecah dokumen (dari loader) menjadi potongan-potongan (chunks)."""
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
-        chunk_overlap=200
+        chunk_overlap=200,
     )
     chunks = text_splitter.split_documents(documents)
     return chunks
@@ -97,8 +96,17 @@ def create_doc_vector_store(doc_chunks, embeddings):
 
 def create_conversational_chain(vector_store, llm):
     """Membuat chain untuk percakapan RAG."""
-    retriever = vector_store.as_retriever()
-    return create_conversational_retrieval_chain(llm, retriever)
+    retriever = vector_store.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 4},
+    )
+    # Pakai ConversationalRetrievalChain sebagai pengganti create_conversational_retrieval_chain
+    chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        return_source_documents=True,
+    )
+    return chain
 
 # --- Antarmuka Streamlit ---
 
@@ -220,4 +228,3 @@ if user_prompt := st.chat_input("Tanyakan sesuatu mengenai dokumen Anda..."):
         
         # Perbarui history untuk chain
         st.session_state.chat_history.append((user_prompt, response))
-        
