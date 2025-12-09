@@ -5,3 +5,4 @@ chromadb
 ollama
 langchainhub
 langchain-text-splitters
+langchain-classic

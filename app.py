@@ -4,15 +4,14 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.llms import Ollama
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.chains import (
-    create_retrieval_chain,
-    create_stuff_documents_chain,
-)
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
+
+# --- Using langchain-classic to avoid import errors ---
+from langchain_classic.chains import RetrievalQA
+from langchain_classic.prompts import PromptTemplate
 
 def get_vectorstore_from_text(text):
-    # Split the text into chunks
+    """Splits text, creates embeddings, and returns a vector store."""
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
     text_chunks = text_splitter.split_text(text)
     
@@ -20,45 +19,44 @@ def get_vectorstore_from_text(text):
         st.error("Could not create text chunks. Is the text long enough?")
         return None
 
-    # Create a vector store from the chunks
     embeddings = OllamaEmbeddings(model="mistral", show_progress=True)
     vector_store = Chroma.from_texts(
         texts=text_chunks,
         embedding=embeddings,
-        collection_name="local-rag" # Added collection name
+        collection_name="local-rag"
     )
     return vector_store
 
 def create_rag_chain(retriever):
-    # This function creates the RAG chain
+    """Creates a RetrievalQA chain using the classic approach."""
     try:
-        # Define the prompt template for the conversational RAG chain
-        system_prompt = (
-            "You are an assistant for question-answering tasks. "
-            "Use the following pieces of retrieved context to answer "
-            "the question. If you don't know the answer, say that you "
-            "don't know. Use three sentences maximum and keep the "
-            "answer concise."
-            "\n\n"
-            "{context}"
-        )
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", system_prompt),
-                MessagesPlaceholder(variable_name="chat_history"),
-                ("human", "{input}"),
-            ]
-        )
-        
-        # Initialize the Ollama LLM
         llm = Ollama(model="mistral", temperature=0)
 
-        # Create the document chain
-        question_answer_chain = create_stuff_documents_chain(llm, prompt)
-        
-        # Create the retrieval chain
-        rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-        
+        # This prompt template is for the RetrievalQA chain
+        prompt_template = (
+            "You are an assistant for question-answering tasks. "
+            "Use the following pieces of retrieved context to answer the question. "
+            "If you don't know the answer, just say that you don't know. "
+            "Keep the answer concise."
+            "\n\n"
+            "Context: {context}"
+            "\n\n"
+            "Question: {question}"
+            "\n\n"
+            "Helpful Answer:"
+        )
+        prompt = PromptTemplate(
+            template=prompt_template, input_variables=["context", "question"]
+        )
+
+        # Create the RetrievalQA chain
+        rag_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=retriever,
+            chain_type_kwargs={"prompt": prompt},
+            return_source_documents=False, # Set to True if you want to see the source docs
+        )
         return rag_chain
     except Exception as e:
         st.error(f"Error creating RAG chain: {e}")
@@ -66,68 +64,77 @@ def create_rag_chain(retriever):
 
 # --- Streamlit App ---
 
-st.set_page_config(page_title="RAG with Ollama", page_icon="🤖")
-st.title("RAG with Ollama and Novel Chapters")
+st.set_page_config(page_title="Classic RAG with Ollama", page_icon="🤖")
+st.title("Classic RAG with Ollama")
 
-# Sidebar for text input
+# Initialize session state
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
 with st.sidebar:
     st.header("1. Add Your Novel")
-    novel_text = st.text_area("Paste one or more chapters of your novel here:", height=300)
-    process_button = st.button("Process Novel")
-    
-    if process_button and novel_text:
-        with st.spinner("Chunking text and creating vector store... This may take a moment."):
-            try:
-                # Ensure the Ollama service is running and the model is available
-                ollama.pull("mistral") 
-            except Exception as e:
-                st.error("Could not connect to Ollama. Please make sure Ollama is running and accessible.")
-                st.stop()
+    novel_text = st.text_area("Paste chapters of your novel here:", height=300)
+    if st.button("Process Novel"):
+        if novel_text:
+            with st.spinner("Processing novel... This may take a moment."):
+                try:
+                    ollama.pull("mistral")
+                    vector_store = get_vectorstore_from_text(novel_text)
+                    if vector_store:
+                        st.session_state.retriever = vector_store.as_retriever()
+                        st.session_state.rag_chain = create_rag_chain(st.session_state.retriever)
+                        st.session_state.chat_history = [AIMessage(content="I've processed the novel. How can I help you?")]
+                        st.success("Novel processed! You can now ask questions.")
+                    else:
+                        st.error("Failed to create vector store.")
+                except Exception as e:
+                    st.error(f"Could not connect to Ollama or process the text. Please ensure Ollama is running. Error: {e}")
+        else:
+            st.warning("Please paste some text to process.")
 
-            vector_store = get_vectorstore_from_text(novel_text)
-            if vector_store:
-                st.session_state.retriever = vector_store.as_retriever()
-                st.session_state.rag_chain = create_rag_chain(st.session_state.retriever)
-                st.session_state.chat_history = []
-                st.success("Novel processed successfully! You can now ask questions.")
-            else:
-                st.error("Failed to process the novel.")
-
-# Main chat interface
 st.header("2. Chat with Your Novel")
 
 if "rag_chain" not in st.session_state:
-    st.info("Please add your novel chapters and click 'Process Novel' to begin.")
+    st.info("Begin by processing your novel in the sidebar.")
 else:
-    # Display previous messages
-    if "chat_history" in st.session_state:
+    # Display chat history
+    for msg in st.session_state.chat_history:
+        if isinstance(msg, HumanMessage):
+            with st.chat_message("user"):
+                st.write(msg.content)
+        else:
+            with st.chat_message("assistant"):
+                st.write(msg.content)
+
+    # User input
+    user_query = st.chat_input("Ask a question...")
+    if user_query:
+        st.chat_message("user").write(user_query)
+        
+        # --- Manual History Management ---
+        # Format previous messages into a string for context
+        history_str = ""
         for msg in st.session_state.chat_history:
             if isinstance(msg, HumanMessage):
-                with st.chat_message("user"):
-                    st.write(msg.content)
-            else: # AIMessage
-                with st.chat_message("assistant"):
-                    st.write(msg.content)
-
-    # Chat input
-    user_query = st.chat_input("Ask a question about your novel...")
-    if user_query:
-        with st.chat_message("user"):
-            st.write(user_query)
+                history_str += f"Human: {msg.content}\n"
+            else:
+                history_str += f"Assistant: {msg.content}\n"
+        
+        # Combine history with the new question
+        full_query = f"Using the conversation history below, answer the new question.\n\nHistory:\n{history_str}\nNew Question: {user_query}"
 
         with st.spinner("Thinking..."):
             try:
-                response = st.session_state.rag_chain.invoke({
-                    "input": user_query,
-                    "chat_history": st.session_state.chat_history
-                })
-                
-                # Update chat history
-                st.session_state.chat_history.append(HumanMessage(content=user_query))
-                st.session_state.chat_history.append(response["answer"])
+                # The classic chain expects a 'query'
+                response = st.session_state.rag_chain.invoke({"query": full_query})
+                answer = response.get("result", "Sorry, I couldn't find an answer.")
 
-                with st.chat_message("assistant"):
-                    st.write(response["answer"])
-            
+                # Update history
+                st.session_state.chat_history.append(HumanMessage(content=user_query))
+                st.session_state.chat_history.append(AIMessage(content=answer))
+                
+                # Display final answer
+                st.chat_message("assistant").write(answer)
+
             except Exception as e:
-                st.error(f"An error occurred: {e}")
+                st.error(f"An error occurred while invoking the chain: {e}")
