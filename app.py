@@ -1,256 +1,278 @@
 import streamlit as st
-from pathlib import Path
+import faiss
+import numpy as np
+import torch
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.llms import CTransformers
+from typing import List, Dict
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# --- Konfigurasi dan Inisialisasi Model ---
+# -----------------------------------------------------------
+# Konstanta model (akan di-download otomatis dari Hugging Face)
+# -----------------------------------------------------------
+EMBED_MODEL_NAME = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+LLM_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
-# Path untuk menyimpan cache model
-CACHE_DIR = Path("./models_cache")
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# -----------------------------------------------------------
+# Cache: load embedding model sekali per server
+# -----------------------------------------------------------
+@st.cache_resource(show_spinner="Mengunduh & memuat embedding Qwen...")
+def load_embed_model():
+    model = SentenceTransformer(EMBED_MODEL_NAME, trust_remote_code=True)
+    return model
 
-# Nama model embedding dan model LLM dari Hugging Face
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-LLM_MODEL_REPO = "TheBloke/Llama-2-7B-Chat-GGUF"
-LLM_MODEL_FILE = "llama-2-7b-chat.Q4_K_M.gguf"
-
-
-@st.cache_resource
-def load_embedding_model():
-    """Mengunduh dan me-load model embedding dari Hugging Face."""
-    st.write(f"Memuat model embedding: {EMBEDDING_MODEL_NAME}...")
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL_NAME,
-        cache_folder=str(CACHE_DIR),
-        model_kwargs={"device": "cpu"},  # Gunakan CPU
-    )
-    st.write("Model embedding berhasil dimuat.")
-    return embeddings
-
-
-@st.cache_resource
+# -----------------------------------------------------------
+# Cache: load LLM Qwen sekali per server
+# -----------------------------------------------------------
+@st.cache_resource(show_spinner="Mengunduh & memuat LLM Qwen... (bisa agak lama)")
 def load_llm():
-    """Mengunduh (jika perlu) dan me-load model LLM GGUF."""
-    st.write("Memuat model LLM lokal...")
-    llm = CTransformers(
-        model=LLM_MODEL_REPO,
-        model_file=LLM_MODEL_FILE,
-        model_type="llama",
-        config={
-            "max_new_tokens": 256,
-            "temperature": 0.7,
-            "context_length": 2048,
-        },
+    tokenizer = AutoTokenizer.from_pretrained(
+        LLM_MODEL_NAME,
+        trust_remote_code=True
     )
-    st.write("Model LLM berhasil dimuat.")
-    return llm
-
-
-# --- Fungsi Inti RAG ---
-
-def get_text_chunks(text_data: str):
-    """Memecah teks menjadi potongan-potongan (chunks)."""
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
+    model = AutoModelForCausalLM.from_pretrained(
+        LLM_MODEL_NAME,
+        trust_remote_code=True,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto",
     )
-    chunks = text_splitter.split_text(text_data)
+    return tokenizer, model
+
+# -----------------------------------------------------------
+# Utility: chunking teks
+# -----------------------------------------------------------
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str]:
+    chunks = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = start + chunk_size
+        chunk = text[start:end]
+        if chunk.strip():
+            chunks.append(chunk)
+        start += chunk_size - overlap
     return chunks
 
+# -----------------------------------------------------------
+# Build FAISS index dari list teks
+# -----------------------------------------------------------
+def build_faiss_index(texts: List[str]):
+    embed_model = load_embed_model()
+    embeddings = embed_model.encode(texts, batch_size=16, convert_to_numpy=True)
+    embeddings = embeddings.astype("float32")
 
-def get_text_chunks_from_docs(documents):
-    """Memecah dokumen (dari loader) menjadi potongan-potongan (chunks)."""
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings)
+    return index
+
+# -----------------------------------------------------------
+# Retrieve top-k context dari query
+# -----------------------------------------------------------
+def retrieve(query: str, top_k: int = 4):
+    if "faiss_index" not in st.session_state:
+        st.warning("Index belum dibuat. Silakan upload teks dan klik 'Bangun RAG Index' dulu.")
+        return []
+
+    embed_model = load_embed_model()
+    q_emb = embed_model.encode([query], convert_to_numpy=True).astype("float32")
+
+    index = st.session_state.faiss_index
+    distances, indices = index.search(q_emb, top_k)
+
+    results = []
+    for idx in indices[0]:
+        if idx < 0 or idx >= len(st.session_state.chunks):
+            continue
+        results.append(st.session_state.chunks[idx])
+    return results
+
+# -----------------------------------------------------------
+# Build prompt untuk Qwen (dengan history + context)
+# -----------------------------------------------------------
+def build_prompt_with_history(question: str, contexts: List[str]) -> List[Dict[str, str]]:
+    # Riwayat chat terakhir (misal 3 pasangan QA)
+    history = st.session_state.chat_history
+    max_turns = 3
+    trimmed_history = history[-max_turns * 2:]  # user+assistant
+
+    # Bentuk string history sederhana
+    history_lines = []
+    for msg in trimmed_history:
+        role_label = "User" if msg["role"] == "user" else "Asisten"
+        history_lines.append(f"{role_label}: {msg['content']}")
+    history_str = "\n".join(history_lines) if history_lines else "(belum ada)"
+
+    # Context dari dokumen
+    context_str = "\n\n---\n\n".join(contexts) if contexts else "(tidak ada konteks)"
+
+    system_prompt = (
+        "Kamu adalah asisten yang menjawab berdasarkan konteks dokumen (novel/teks) yang diberikan.\n"
+        "Jika jawaban tidak ada di konteks, katakan bahwa kamu tidak yakin dan jangan mengarang."
     )
-    chunks = text_splitter.split_documents(documents)
-    return chunks
 
+    user_content = (
+        f"Riwayat percakapan sejauh ini:\n{history_str}\n\n"
+        f"Konteks dokumen yang relevan:\n{context_str}\n\n"
+        f"Pertanyaan terbaru user: {question}\n\n"
+        "Jawab dengan bahasa Indonesia yang jelas dan ringkas."
+    )
 
-def create_vector_store_from_text(text_chunks, embeddings):
-    """Membuat vector store dari potongan teks."""
-    if not text_chunks:
-        st.warning("Tidak ada teks untuk diproses. Silakan masukkan teks atau unggah file.")
-        return None
-    st.write("Membuat vector store...")
-    vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
-    st.write("Vector store berhasil dibuat.")
-    return vectorstore
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+    return messages
 
+# -----------------------------------------------------------
+# Panggil Qwen LLM
+# -----------------------------------------------------------
+def call_qwen(messages: List[Dict[str, str]], max_new_tokens: int = 512, temperature: float = 0.7) -> str:
+    tokenizer, model = load_llm()
 
-def create_vector_store_from_docs(doc_chunks, embeddings):
-    """Membuat vector store dari potongan dokumen."""
-    if not doc_chunks:
-        st.warning("Gagal memproses dokumen. Pastikan format file didukung (PDF, TXT).")
-        return None
-    st.write("Membuat vector store dari dokumen...")
-    vectorstore = FAISS.from_documents(documents=doc_chunks, embedding=embeddings)
-    st.write("Vector store berhasil dibuat.")
-    return vectorstore
+    # Qwen pakai chat template dari tokenizer
+    chat_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    inputs = tokenizer(chat_text, return_tensors="pt").to(model.device)
 
-
-def rag_answer(question: str, llm, vector_store, chat_history):
-    """Lakukan retrieval + generate jawaban dengan manual chain (tanpa langchain.chains)."""
-    # Ambil dokumen paling relevan
-    docs = vector_store.similarity_search(question, k=4)
-    context = "\n\n".join([d.page_content for d in docs])
-
-    # Ambil sedikit riwayat percakapan sebelumnya
-    history_text = ""
-    for q, a in chat_history[-5:]:
-        history_text += f"User: {q}\nAI: {a}\n"
-
-    prompt = f"""
-Kamu adalah asisten AI yang menjawab berdasarkan dokumen yang diberikan.
-
-Riwayat percakapan sebelumnya (jika ada):
-{history_text}
-
-Konteks dokumen yang relevan:
-{context}
-
-Pertanyaan user: {question}
-
-Jawab dalam bahasa Indonesia secara jelas dan ringkas.
-Jika jawaban tidak ada di dalam konteks dokumen, jujur katakan bahwa kamu tidak yakin berdasarkan dokumen yang tersedia.
-"""
-
-    # CTransformers di LangChain baru biasanya pakai .invoke()
-    try:
-        response = llm.invoke(prompt)
-    except AttributeError:
-        # fallback kalau versi yang terinstall pakai __call__
-        response = llm(prompt)
-
-    # Kalau response berupa dict (beberapa versi), ambil "content" / "text"
-    if isinstance(response, dict):
-        response_text = response.get("content") or response.get("text") or str(response)
-    else:
-        response_text = str(response)
-
-    return response_text
-
-
-# --- Antarmuka Streamlit ---
-
-st.set_page_config(page_title="Chat dengan Dokumen Lokal (RAG)", layout="wide")
-st.title("Chatbot RAG dengan LLM Lokal")
-st.markdown("Unggah dokumen atau masukkan teks, lalu ajukan pertanyaan tentang isinya.")
-
-# Inisialisasi session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "vector_store" not in st.session_state:
-    st.session_state.vector_store = None
-if "llm" not in st.session_state:
-    st.session_state.llm = None
-
-# Sidebar untuk input data
-with st.sidebar:
-    st.header("Sumber Data")
-
-    input_method = st.radio("Pilih metode input:", ("Unggah File", "Ketik Teks"))
-
-    if input_method == "Ketik Teks":
-        user_text = st.text_area("Ketik atau tempel teks di sini:")
-        if st.button("Proses Teks"):
-            if user_text:
-                with st.spinner("Memproses teks..."):
-                    embeddings = load_embedding_model()
-                    text_chunks = get_text_chunks(user_text)
-                    vector_store = create_vector_store_from_text(text_chunks, embeddings)
-                    if vector_store:
-                        llm = load_llm()
-                        st.session_state.vector_store = vector_store
-                        st.session_state.llm = llm
-                        st.success("Teks berhasil diproses! Anda bisa mulai chat.")
-            else:
-                st.warning("Teks tidak boleh kosong.")
-
-    elif input_method == "Unggah File":
-        uploaded_files = st.file_uploader(
-            "Unggah file (PDF, TXT)",
-            type=["pdf", "txt"],
-            accept_multiple_files=True,
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=temperature,
+            pad_token_id=tokenizer.eos_token_id,
         )
-        if st.button("Proses File"):
-            if uploaded_files:
-                with st.spinner("Memproses file..."):
-                    embeddings = load_embedding_model()
 
-                    temp_files = []
-                    temp_dir = Path("temp_docs")
-                    temp_dir.mkdir(exist_ok=True)
-                    for uploaded_file in uploaded_files:
-                        temp_path = temp_dir / uploaded_file.name
-                        with open(temp_path, "wb") as f:
-                            f.write(uploaded_file.getbuffer())
-                        temp_files.append(str(temp_path))
+    generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
+    answer = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    return answer
 
-                    docs = []
-                    for path in temp_files:
-                        if path.endswith(".pdf"):
-                            loader = PyPDFLoader(path)
-                        else:
-                            loader = TextLoader(path, encoding="utf-8")
-                        docs.extend(loader.load())
+# -----------------------------------------------------------
+# Streamlit main app
+# -----------------------------------------------------------
+def main():
+    st.set_page_config(page_title="Qwen RAG di Streamlit", page_icon="📚")
 
-                    doc_chunks = get_text_chunks_from_docs(docs)
-                    vector_store = create_vector_store_from_docs(doc_chunks, embeddings)
+    st.title("📚 Qwen RAG LLM di Streamlit")
+    st.caption("Upload teks → Bangun RAG → Chat dengan Qwen yang ingat history (per sesi).")
 
-                    if vector_store:
-                        llm = load_llm()
-                        st.session_state.vector_store = vector_store
-                        st.session_state.llm = llm
-                        st.success("File berhasil diproses! Anda bisa mulai chat.")
+    # Inisialisasi session_state
+    if "chunks" not in st.session_state:
+        st.session_state.chunks = []
+    if "faiss_index" not in st.session_state:
+        st.session_state.faiss_index = None
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []  # list of {role, content}
 
-                    # Hapus file sementara
-                    for path in temp_files:
-                        Path(path).unlink()
-            else:
-                st.warning("Silakan unggah setidaknya satu file.")
+    st.sidebar.header("Pengaturan Chat")
+    top_k = st.sidebar.slider("Top K dokumen", 1, 10, 4)
+    max_tokens = st.sidebar.slider("Max new tokens", 64, 1024, 512, step=64)
+    temperature = st.sidebar.slider("Temperature", 0.0, 1.2, 0.7, step=0.1)
 
-    st.divider()
-    if st.button("Bersihkan Riwayat Chat"):
-        st.session_state.messages = []
+    # -------------------------
+    # Bagian upload teks / input teks
+    # -------------------------
+    st.subheader("1. Upload / Input Teks untuk RAG")
+
+    uploaded_files = st.file_uploader(
+        "Upload file teks (.txt). Bisa lebih dari satu.",
+        type=["txt"],
+        accept_multiple_files=True,
+    )
+
+    manual_text = st.text_area(
+        "Atau tempel teks langsung di sini",
+        height=150,
+        placeholder="Tempel novel / dokumen di sini jika tidak memakai file .txt...",
+    )
+
+    if st.button("Bangun RAG Index"):
+        all_texts = []
+
+        # Dari file upload
+        if uploaded_files:
+            for f in uploaded_files:
+                content = f.read().decode("utf-8", errors="ignore")
+                if content.strip():
+                    all_texts.append(content)
+
+        # Dari text area
+        if manual_text.strip():
+            all_texts.append(manual_text)
+
+        if not all_texts:
+            st.error("Tidak ada teks yang bisa dipakai. Upload file atau isi text area dulu.")
+        else:
+            with st.spinner("Melakukan chunking & membangun index RAG..."):
+                chunks = []
+                for t in all_texts:
+                    chunks.extend(chunk_text(t, chunk_size=500, overlap=100))
+
+                st.session_state.chunks = chunks
+                st.session_state.faiss_index = build_faiss_index(chunks)
+
+            st.success(f"Index berhasil dibuat dengan {len(st.session_state.chunks)} chunk.")
+
+    st.markdown("---")
+
+    # -------------------------
+    # Bagian Chat
+    # -------------------------
+    st.subheader("2. Chat dengan Qwen (RAG)")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        clear = st.button("🧹 Clear chat")
+    with col2:
+        st.write("")  # spacer
+
+    if clear:
         st.session_state.chat_history = []
-        st.rerun()
+        st.success("Chat dibersihkan (dokumen & index tetap ada).")
 
-# --- Tampilan Chat ---
+    # Tampilkan riwayat chat
+    for msg in st.session_state.chat_history:
+        with st.chat_message("user" if msg["role"] == "user" else "assistant"):
+            st.markdown(msg["content"])
 
-# Tampilkan riwayat chat
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+    # Input chat
+    user_input = st.chat_input("Tulis pertanyaan kamu di sini...")
 
-# Input user
-if user_prompt := st.chat_input("Tanyakan sesuatu mengenai dokumen Anda..."):
-    if st.session_state.vector_store is None or st.session_state.llm is None:
-        st.warning("Harap proses dokumen atau teks terlebih dahulu.")
-    else:
-        # Simpan pesan user
-        st.session_state.messages.append({"role": "user", "content": user_prompt})
-        with st.chat_message("user"):
-            st.markdown(user_prompt)
+    if user_input:
+        if st.session_state.faiss_index is None:
+            st.warning("Index belum ada. Bangun dulu dari teks di atas.")
+        else:
+            # Simpan pertanyaan ke history
+            st.session_state.chat_history.append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
 
-        # Jawab dengan RAG manual
-        with st.chat_message("assistant"):
-            with st.spinner("Memikirkan jawaban..."):
-                response = rag_answer(
-                    question=user_prompt,
-                    llm=st.session_state.llm,
-                    vector_store=st.session_state.vector_store,
-                    chat_history=st.session_state.chat_history,
-                )
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
+            with st.chat_message("assistant"):
+                with st.spinner("Mencari konteks & memanggil Qwen..."):
+                    contexts = retrieve(user_input, top_k=top_k)
+                    messages = build_prompt_with_history(user_input, contexts)
+                    answer = call_qwen(
+                        messages,
+                        max_new_tokens=max_tokens,
+                        temperature=temperature,
+                    )
 
-        # Update chat history untuk konteks berikutnya
-        st.session_state.chat_history.append((user_prompt, response))
+                st.markdown(answer)
+
+            # Simpan jawaban ke history
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+
+            # Opsional: tampilkan konteks
+            if contexts:
+                with st.expander("Lihat konteks dokumen yang dipakai"):
+                    for i, c in enumerate(contexts):
+                        st.markdown(f"**Context {i+1}:**")
+                        st.write(c)
+                        st.markdown("---")
+
+if __name__ == "__main__":
+    main()
