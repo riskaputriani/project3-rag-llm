@@ -4,3 +4,4 @@ langchain-community
 chromadb
 ollama
 langchainhub
+langchain-text-splitters
