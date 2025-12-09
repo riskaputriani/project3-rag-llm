@@ -1,8 +1,14 @@
 streamlit
-langchain
+
+# Inti LangChain baru
+langchain-core
 langchain-community
 langchain-text-splitters
+
+# Embedding & vector store
 sentence-transformers
 faiss-cpu
 pypdf
+
+# LLM lokal GGUF
 ctransformers>=0.2.27
