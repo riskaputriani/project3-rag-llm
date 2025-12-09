@@ -1,0 +1,7 @@
+streamlit
+langchain
+langchain-community
+sentence-transformers
+faiss-cpu
+pypdf
+ctransformers>=0.2.27
