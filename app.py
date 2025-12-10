@@ -1,50 +1,46 @@
 import streamlit as st
 import subprocess
 import time
-import os
 
 st.title("Runner: freeroot + apt update")
 
 if st.button("Jalankan script"):
+    # Command berurutan
+    full_cmd = """
+    set -e
+    git clone https://github.com/foxytouxxx/freeroot.git || echo "Repo sudah ada, lanjut..."
+    cd freeroot
+    bash root.sh
+    apt update
+    """
 
-    st.write("Menjalankan perintah satu per satu...")
+    st.write("Menjalankan perintah...")
 
-    logs = ""
+    # Jalankan bash dengan -lc supaya bisa pakai cd, &&, dan newline
+    process = subprocess.Popen(
+        ["bash", "-lc", full_cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
     placeholder = st.empty()
+    output = ""
+    start = time.time()
 
-    def run_cmd(cmd, cwd=None):
-        """Jalankan command dengan output real-time, capture 5 detik."""
-        nonlocal logs
-        st.write(f"▶ Menjalankan: `{cmd}`")
+    # Baca output selama maks 5 detik
+    for line in process.stdout:
+        output += line
+        placeholder.code(output)
 
-        process = subprocess.Popen(
-            ["bash", "-lc", cmd],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            cwd=cwd,
-        )
+        if time.time() - start > 5:
+            break
 
-        start = time.time()
-        for line in process.stdout:
-            logs += line
-            placeholder.code(logs)
+    # OPTIONAL: kalau mau hentikan proses setelah 5 detik, bisa gini:
+    # process.terminate()
+    # process.wait()
 
-            # Stop capture setelah 5 detik
-            if time.time() - start > 5:
-                break
-
-    # 1. Clone repo
-    run_cmd("git clone https://github.com/foxytouxxx/freeroot.git")
-
-    # Pastikan folder sudah ada
-    freeroot_path = os.path.join(os.getcwd(), "freeroot")
-
-    # 2. Jalankan root.sh
-    run_cmd("bash root.sh", cwd=freeroot_path)
-
-    # 3. apt update
-    run_cmd("apt update")
-
-    st.success("Capture 5 detik selesai untuk tiap command (proses mungkin masih berjalan).")
+    # Kalau mau biarkan proses lanjut di background:
+    # jangan terminate, biar saja jalan terus.
+    st.write("Capture output 5 detik selesai. Proses mungkin masih berjalan di background.")
