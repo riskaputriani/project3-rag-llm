@@ -1,48 +1,50 @@
 import streamlit as st
 import subprocess
 import time
+import os
 
 st.title("Runner: freeroot + apt update")
 
 if st.button("Jalankan script"):
-    # Command berurutan
-    full_cmd = """
-    cd /home/adminuser
-    git clone https://github.com/foxytouxxx/freeroot.git
-    cd freeroot
-    bash root.sh
-    apt update
-    """
 
-    st.write("Menjalankan perintah...")
+    st.write("Menjalankan perintah satu per satu...")
 
-    # Jalankan bash dengan -lc supaya bisa pakai cd, &&, dll
-    process = subprocess.Popen(
-        ["bash", "-lc", full_cmd],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-
+    logs = ""
     placeholder = st.empty()
-    output = ""
-    start = time.time()
 
-    # Baca output selama 5 detik
-    for line in process.stdout:
-        output += line
-        placeholder.code(output)
+    def run_cmd(cmd, cwd=None):
+        """Jalankan command dengan output real-time, capture 5 detik."""
+        nonlocal logs
+        st.write(f"▶ Menjalankan: `{cmd}`")
 
-        if time.time() - start > 5:
-            break
+        process = subprocess.Popen(
+            ["bash", "-lc", cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=cwd,
+        )
 
-    # OPTIONAL:
-    # Kalau kamu mau matikan proses setelah 5 detik, uncomment ini:
-    # process.terminate()
-    # process.wait()
+        start = time.time()
+        for line in process.stdout:
+            logs += line
+            placeholder.code(logs)
 
-    # Kalau mau nunggu sampai selesai setelah 5 detik pertama:
-    # process.wait()
-    # sisa output bisa kamu baca lagi kalau mau
-    st.write("Capture 5 detik selesai. Proses mungkin masih berjalan di background.")
+            # Stop capture setelah 5 detik
+            if time.time() - start > 5:
+                break
+
+    # 1. Clone repo
+    run_cmd("git clone https://github.com/foxytouxxx/freeroot.git")
+
+    # Pastikan folder sudah ada
+    freeroot_path = os.path.join(os.getcwd(), "freeroot")
+
+    # 2. Jalankan root.sh
+    run_cmd("bash root.sh", cwd=freeroot_path)
+
+    # 3. apt update
+    run_cmd("apt update")
+
+    st.success("Capture 5 detik selesai untuk tiap command (proses mungkin masih berjalan).")
