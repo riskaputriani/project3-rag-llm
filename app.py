@@ -11,7 +11,7 @@ if st.button("Jalankan script"):
     git clone https://github.com/foxytouxxx/freeroot.git || echo "Repo sudah ada, lanjut..."
     cd freeroot
     bash root.sh
-    apt update
+    apt install nano
     echo "done update"
     """
 
