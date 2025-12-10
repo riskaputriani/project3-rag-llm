@@ -1,54 +1,48 @@
 import streamlit as st
 import subprocess
-import shlex
+import time
 
-st.title("Subprocess Runner")
+st.title("Runner: freeroot + apt update")
 
-# Input command
-user_cmd = st.text_input("Masukkan command subprocess", "ping -c 4 google.com")
+if st.button("Jalankan script"):
+    # Command berurutan
+    full_cmd = """
+    cd /home/adminuser
+    git clone https://github.com/foxytouxxx/freeroot.git
+    cd freeroot
+    bash root.sh
+    apt update
+    """
 
-# Tombol untuk eksekusi
-if st.button("Jalankan Command"):
-    if not user_cmd.strip():
-        st.error("Command tidak boleh kosong.")
-    else:
-        st.write(f"Menjalankan: `{user_cmd}`")
+    st.write("Menjalankan perintah...")
 
-        # Parse command -> lebih aman daripada shell=True
-        try:
-            cmd = shlex.split(user_cmd)
-        except Exception as e:
-            st.error(f"Command error: {e}")
-            st.stop()
+    # Jalankan bash dengan -lc supaya bisa pakai cd, &&, dll
+    process = subprocess.Popen(
+        ["bash", "-lc", full_cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
 
-        # Mulai subprocess
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1
-            )
+    placeholder = st.empty()
+    output = ""
+    start = time.time()
 
-            output_box = st.empty()
-            logs = ""
+    # Baca output selama 5 detik
+    for line in process.stdout:
+        output += line
+        placeholder.code(output)
 
-            # Stream real-time
-            for line in process.stdout:
-                logs += line
-                output_box.code(logs)
+        if time.time() - start > 5:
+            break
 
-            process.wait()
+    # OPTIONAL:
+    # Kalau kamu mau matikan proses setelah 5 detik, uncomment ini:
+    # process.terminate()
+    # process.wait()
 
-            # Ambil stderr jika ada
-            err = process.stderr.read()
-            if err:
-                st.error(err)
-
-            st.success("Selesai menjalankan command.")
-
-        except FileNotFoundError:
-            st.error("Command tidak ditemukan. Pastikan perintah tersedia.")
-        except Exception as e:
-            st.error(f"Error saat menjalankan subprocess: {e}")
+    # Kalau mau nunggu sampai selesai setelah 5 detik pertama:
+    # process.wait()
+    # sisa output bisa kamu baca lagi kalau mau
+    st.write("Capture 5 detik selesai. Proses mungkin masih berjalan di background.")
