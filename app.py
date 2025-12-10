@@ -1,47 +1,90 @@
+import ollama
 import streamlit as st
-import subprocess
-import time
+from openai import OpenAI
+from utilities.icon import page_icon
 
-st.title("Runner: freeroot + apt update")
+st.set_page_config(
+    page_title="Chat playground",
+    page_icon="💬",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-if st.button("Jalankan script"):
-    # Command berurutan
-    full_cmd = """
-    set -e
-    git clone https://github.com/foxytouxxx/freeroot.git || echo "Repo sudah ada, lanjut..."
-    cd freeroot
-    bash root.sh
-    apt install nano
-    echo "done update"
+
+def extract_model_names(models_info: list) -> tuple:
+    """
+    Extracts the model names from the models information.
+
+    :param models_info: A dictionary containing the models' information.
+
+    Return:
+        A tuple containing the model names.
     """
 
-    st.write("Menjalankan perintah...")
+    return tuple(model["name"] for model in models_info["models"])
 
-    # Jalankan bash dengan -lc supaya bisa pakai cd, &&, dan newline
-    process = subprocess.Popen(
-        ["bash", "-lc", full_cmd],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
+
+def main():
+    """
+    The main function that runs the application.
+    """
+
+    page_icon("💬")
+    st.subheader("Ollama Playground", divider="red", anchor=False)
+
+    client = OpenAI(
+        base_url="http://localhost:11434/v1",
+        api_key="ollama",  # required, but unused
     )
 
-    placeholder = st.empty()
-    output = ""
-    start = time.time()
+    models_info = ollama.list()
+    available_models = extract_model_names(models_info)
 
-    # Baca output selama maks 5 detik
-    for line in process.stdout:
-        output += line
-        placeholder.code(output)
+    if available_models:
+        selected_model = st.selectbox(
+            "Pick a model available locally on your system ↓", available_models
+        )
 
-        if time.time() - start > 5:
-            break
+    else:
+        st.warning("You have not pulled any model from Ollama yet!", icon="⚠️")
+        if st.button("Go to settings to download a model"):
+            st.page_switch("pages/03_⚙️_Settings.py")
 
-    # OPTIONAL: kalau mau hentikan proses setelah 5 detik, bisa gini:
-    # process.terminate()
-    # process.wait()
+    message_container = st.container(height=500, border=True)
 
-    # Kalau mau biarkan proses lanjut di background:
-    # jangan terminate, biar saja jalan terus.
-    st.write("Capture output 5 detik selesai. Proses mungkin masih berjalan di background.")
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for message in st.session_state.messages:
+        avatar = "🤖" if message["role"] == "assistant" else "😎"
+        with message_container.chat_message(message["role"], avatar=avatar):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("Enter a prompt here..."):
+        try:
+            st.session_state.messages.append(
+                {"role": "user", "content": prompt})
+
+            message_container.chat_message("user", avatar="😎").markdown(prompt)
+
+            with message_container.chat_message("assistant", avatar="🤖"):
+                with st.spinner("model working..."):
+                    stream = client.chat.completions.create(
+                        model=selected_model,
+                        messages=[
+                            {"role": m["role"], "content": m["content"]}
+                            for m in st.session_state.messages
+                        ],
+                        stream=True,
+                    )
+                # stream response
+                response = st.write_stream(stream)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": response})
+
+        except Exception as e:
+            st.error(e, icon="⛔️")
+
+
+if __name__ == "__main__":
+    main()
