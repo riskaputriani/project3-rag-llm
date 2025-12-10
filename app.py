@@ -12,6 +12,7 @@ if st.button("Jalankan script"):
     cd freeroot
     bash root.sh
     apt update
+    echo "done update"
     """
 
     st.write("Menjalankan perintah...")
